@@ -114,7 +114,8 @@ class APIMonitor:
         payload = json.dumps(status, ensure_ascii=False)
         self.mqtt_client.publish(
             f"{STATUS_TOPIC}",
-            payload
+            payload,
+            retain=True  # 设置 retain 标志为 True
         )
         print(f"Published status: {payload}")
 
