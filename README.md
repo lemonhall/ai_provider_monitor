@@ -1,3 +1,6 @@
+![2ab9b68a36219debc6ee6cb77eba00d7](https://github.com/user-attachments/assets/67bd5cae-01cb-475d-b4d2-22941fcbe356)
+
+
 0、**项目背景**
     
     监控多个AI服务商并将状态定时更新到监控屏幕，当前使用了MQTT协议推送到消息服务器
