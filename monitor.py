@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import time
 import json
@@ -12,7 +13,10 @@ from openai import APIConnectionError, APIError, APIStatusError
 MQTT_BROKER = "192.168.50.233"
 MQTT_PORT = 1883
 STATUS_TOPIC = "api_status"  # 状态上报主题
-CHECK_INTERVAL = 300  # 检查间隔（秒）
+CHECK_INTERVAL = 600  # 检查间隔（秒）
+
+# 日志文件路径
+LOG_FILE = "mqtt_status.log"
 
 # 服务商配置列表
 PROVIDERS = [
@@ -108,6 +112,15 @@ class APIMonitor:
         for provider in PROVIDERS:
             status = self.check_provider_status(provider)
             self.publish_status(status)
+            
+    def log_payload(self, payload: str):
+        """将 payload 写入日志文件"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] Published status: {payload}\n"
+
+        # 确保以 UTF-8 格式写入文件
+        with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+            log_file.write(log_entry)
     
     def publish_status(self, status: Dict):
         """发布状态到MQTT"""
@@ -118,6 +131,8 @@ class APIMonitor:
             retain=True  # 设置 retain 标志为 True
         )
         print(f"Published status: {payload}")
+        # 写入日志文件
+        self.log_payload(payload)
 
 if __name__ == "__main__":
     monitor = APIMonitor()
