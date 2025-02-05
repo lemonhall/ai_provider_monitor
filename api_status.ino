@@ -257,7 +257,7 @@ void loop() {
     ESP.restart();
   }
 
-  delay(30000); // 更新频率
+  delay(3000); // 更新频率
 }
 
 // 更新屏幕显示
@@ -271,7 +271,7 @@ void updateScreen() {
   drawService("Huoshan", huoshan, 10, 90);
 
   // 绘制曲线
-  drawCurve(deepseek_history, RED, 10, 130, CURVE_HISTORY);
-  drawCurve(siliconflow_history, GREEN, 10, 160, CURVE_HISTORY);
-  drawCurve(huoshan_history, BLUE, 10, 190, CURVE_HISTORY);
+  drawCurve(deepseek_history, RED, 190, 10, CURVE_HISTORY);
+  drawCurve(siliconflow_history, GREEN, 190, 50, CURVE_HISTORY);
+  drawCurve(huoshan_history, BLUE, 190, 90, CURVE_HISTORY);
 }
