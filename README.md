@@ -23,5 +23,11 @@
 
 4、**TODO**
 
-增加ESP-32那边的代码，读取MQTT来做警告
+    增加ESP-32那边的代码，读取MQTT来做警告 已完成
 
+5、**增加服务端接口**
+
+    uv add fastapi uvicorn duckdb
+    uv add asyncio httpx
+
+    

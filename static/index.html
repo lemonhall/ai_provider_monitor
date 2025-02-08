@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI API 监控系统</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 10px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .monitor-panel {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .status-box {
+            flex: 1 1 300px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .service-name {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .status-indicator {
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+        .date-time {
+            color: #666;
+            margin-bottom: 20px;
+        }
+        .error-message {
+            color: #f44336;
+            margin-top: 10px;
+        }
+        .chart-container {
+            margin-top: 20px;
+        }
+        @media (max-width: 600px) {
+            .monitor-panel {
+                flex-direction: column;
+            }
+            .status-box {
+                flex: 1 1 100%;
+            }
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="monitor-panel">
+            <div id="deepseek-status" class="status-box">
+                <div class="service-name">DeepSeek</div>
+                <div class="status-indicator" id="deepseek-status-indicator"></div>
+                <div class="response-time" id="deepseek-response-time"></div>
+                <div class="date-time" id="deepseek-date-time"></div>
+                <div class="error-message" id="deepseek-error-message"></div>
+                <div class="chart-container">
+                    <canvas id="deepseek-chart"></canvas>
+                </div>
+            </div>
+
+            <div id="siliconflow-status" class="status-box">
+                <div class="service-name">SiliconFlow</div>
+                <div class="status-indicator" id="siliconflow-status-indicator"></div>
+                <div class="response-time" id="siliconflow-response-time"></div>
+                <div class="date-time" id="siliconflow-date-time"></div>
+                <div class="error-message" id="siliconflow-error-message"></div>
+                <div class="chart-container">
+                    <canvas id="siliconflow-chart"></canvas>
+                </div>
+            </div>
+
+            <div id="huoshan-status" class="status-box">
+                <div class="service-name">Huoshan</div>
+                <div class="status-indicator" id="huoshan-status-indicator"></div>
+                <div class="response-time" id="huoshan-response-time"></div>
+                <div class="date-time" id="huoshan-date-time"></div>
+                <div class="error-message" id="huoshan-error-message"></div>
+                <div class="chart-container">
+                    <canvas id="huoshan-chart"></canvas>
+                </div>
+            </div>
+
+            <div id="tencent-status" class="status-box">
+                <div class="service-name">Tencent</div>
+                <div class="status-indicator" id="tencent-status-indicator"></div>
+                <div class="response-time" id="tencent-response-time"></div>
+                <div class="date-time" id="tencent-date-time"></div>
+                <div class="error-message" id="tencent-error-message"></div>
+                <div class="chart-container">
+                    <canvas id="tencent-chart"></canvas>
+                </div>
+            </div>
+
+            <div id="bailian-status" class="status-box">
+                <div class="service-name">Bailian</div>
+                <div class="status-indicator" id="bailian-status-indicator"></div>
+                <div class="response-time" id="bailian-response-time"></div>
+                <div class="date-time" id="bailian-date-time"></div>
+                <div class="error-message" id="bailian-error-message"></div>
+                <div class="chart-container">
+                    <canvas id="bailian-chart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            // 服务列表（提供商名称）
+            const services = ["deepseek", "siliconflow", "huoshan", "tencent", "bailian"];
+
+            // 存储最新状态数据的容器
+            const serviceStatus = {};
+
+            // API 端点
+            const API_URL = "http://localhost:8000/api_status/history"; // 替换为你的 FastAPI 服务器实际 URL
+
+            // 历史数据图表配置
+            const CHART_COLORS = {
+                deepseek: "rgb(255, 99, 132)",
+                siliconflow: "rgb(54, 162, 235)",
+                huoshan: "rgb(255, 205, 86)",
+                tencent: "rgb(75, 192, 192)",
+                bailian: "rgb(153, 102, 255)"
+            };
+
+            // 初始化图表
+            const initializeCharts = () => {
+                const chartConfig = {
+                    type: 'line',
+                    data: {
+                        labels: [], // 时间戳数组
+                        datasets: [
+                            {
+                                label: '响应时间',
+                                data: [], // 响应时间数据
+                                borderColor: '#000', // 默认颜色
+                                borderWidth: 1
+                            }
+                        ]
+                    },
+                    options: {
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: '响应时间 (ms)'
+                                }
+                            }
+                        }
+                    }
+                };
+
+                services.forEach(service => {
+                    const canvas = document.getElementById(`${service}-chart`);
+                    if (canvas) {
+                        const ctx = canvas.getContext('2d');
+                        const color = CHART_COLORS[service] || '#000';
+                        chartConfig.data.datasets[0].borderColor = color;
+                        serviceStatus[service] = {
+                            chart: new Chart(ctx, { ...chartConfig }),
+                            current: {},
+                            history: []
+                        };
+                    } else {
+                        console.error(`Canvas element with ID ${service}-chart not found`);
+                    }
+                });
+            };
+
+            initializeCharts();
+
+            // 获取时间戳对应的日期时间
+            const getDateTimeFromTimestamp = (timestamp) => {
+                const date = new Date(timestamp * 1000); // 转换为毫秒
+                return date.toLocaleString();
+            };
+
+            // 更新服务状态框
+            const updateServiceBox = (service, status) => {
+                const statusBox = document.getElementById(`${service}-status`);
+                if (!statusBox) {
+                    console.error(`Service box for ${service} not found`);
+                    return;
+                }
+
+                const statusIndicator = statusBox.querySelector(".status-indicator");
+                const responseTime = statusBox.querySelector(".response-time");
+                const errorMessage = statusBox.querySelector(".error-message");
+                const dateTime = statusBox.querySelector(".date-time");
+
+                if (statusIndicator && responseTime && errorMessage && dateTime) {
+                    statusIndicator.textContent = status.online ? "上线" : "掉线";
+                    statusIndicator.style.color = status.online ? "#4CAF50" : "#f44336";
+
+                    if (status.online) {
+                        responseTime.textContent = `响应时间: ${status.response_time} ms`;
+                        errorMessage.textContent = "";
+                    } else {
+                        responseTime.textContent = "";
+                        errorMessage.textContent = `错误信息: ${status.error || "无"}`;
+                    }
+
+                    dateTime.textContent = `更新时间: ${getDateTimeFromTimestamp(status.timestamp)}`;
+                } else {
+                    console.error(`Missing elements in service box for ${service}`);
+                }
+            };
+
+            // 更新历史数据图表
+            const updateCharts = (data) => {
+                data.forEach(item => {
+                    const provider = item.provider.toLowerCase();
+                    if (services.includes(provider)) {
+                        serviceStatus[provider].history.push({
+                            timestamp: item.timestamp,
+                            response_time: item.response_time
+                        });
+
+                        serviceStatus[provider].history = serviceStatus[provider].history.slice(-30);
+
+                        const chart = serviceStatus[provider].chart;
+                        chart.data.labels = serviceStatus[provider].history.map(h => h.timestamp);
+                        chart.data.datasets[0].data = serviceStatus[provider].history.map(h => h.response_time);
+                        chart.update();
+                    }
+                });
+            };
+
+            // 从 API 获取数据
+            const fetchData = async () => {
+                try {
+                    const response = await fetch(API_URL);
+                    const data = await response.json();
+
+                    // 初始化服务状态（确保每个服务都有默认状态）
+                    services.forEach(service => {
+                        if (!serviceStatus[service].current) {
+                            serviceStatus[service].current = {
+                                online: false,
+                                response_time: 0,
+                                error: "无",
+                                timestamp: Math.floor(Date.now() / 1000)
+                            };
+                        }
+                    });
+
+                    data.forEach(item => {
+                        const provider = item.provider.toLowerCase();
+                        if (services.includes(provider)) {
+                            serviceStatus[provider].current = item;
+                        }
+                    });
+
+                    // 更新页面和服务框
+                    services.forEach(service => {
+                        updateServiceBox(service, serviceStatus[service].current);
+                    });
+
+                    // 更新图表
+                    updateCharts(data);
+                } catch (error) {
+                    console.error("Error fetching data:", error);
+                }
+            };
+
+            // 定期更新数据
+            setInterval(fetchData, 5000); // 每5秒更新一次
+
+            // 立即获取初始数据
+            fetchData();
+        });
+    </script>
+</body>
+</html>

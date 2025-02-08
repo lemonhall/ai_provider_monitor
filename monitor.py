@@ -8,6 +8,9 @@ import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 from openai import OpenAI
 from openai import APIConnectionError, APIError, APIStatusError
+# 使用 asyncio 运行异步代码
+import asyncio
+import httpx
 
 
 # -----------------------------------------------------------------------------
@@ -160,6 +163,27 @@ class APIMonitor:
             retain=True  # 设置 retain 标志为 True
         )
         print(f"Published status: {payload}")
+
+        """发布状态到 FastAPI 服务器"""
+        async def send_request():
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "http://localhost:8000/api_status",  # 替换为 FastAPI 服务器的实际 IP 和端口
+                    json=status
+                )
+                return response
+
+        try:
+            # 使用 asyncio.run 运行异步函数
+            response = asyncio.run(send_request())
+            
+            if response.status_code == 200:
+                print(f"Status published successfully: {payload}")
+            else:
+                print(f"Failed to publish status: {response.text}")
+                print(response)
+        except Exception as e:
+            print(f"Error publishing status: {str(e)}")
         # 写入日志文件
         self.log_payload(payload)
 
