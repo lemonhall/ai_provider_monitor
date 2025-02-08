@@ -60,6 +60,12 @@ PROVIDERS = [
         "env_var": "TENCENT_API_KEY",
         "base_url": "https://api.lkeap.cloud.tencent.com/v1",
         "model": "deepseek-v3"
+    },
+    {
+        "name": "bailian",
+        "env_var": "DASHSCOPE_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "deepseek-v3"
     }
 ]
 
