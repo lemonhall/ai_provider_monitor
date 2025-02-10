@@ -10,7 +10,9 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from openai import APIConnectionError, APIError, AsyncOpenAI
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
 import uvicorn
+
 
 # 服务商配置列表
 PROVIDERS = [
@@ -70,7 +72,7 @@ class RoutingManager:
         stats.success_rate = 1 - (stats.failed_requests / stats.total_requests)
         stats.response_time = (stats.response_time + response_time) / stats.total_requests
         stats.last_check = datetime.now()
-        print(provider,stats)
+        print(provider,":",stats)
 
     def get_best_provider(self) -> Optional[Dict]:
         available = []
@@ -141,7 +143,7 @@ class APIMonitor:
             self.routing.update_stats(
                 provider["name"],
                 success=False,
-                response_time=0
+                response_time=30000  #失败一次我就给你加30秒的惩罚
             )
         
         finally:
@@ -216,70 +218,70 @@ class OpenAIGateway:
         )
 
     async def forward_request(self, provider: Dict, request: Request):
+        print("进入了forward_request")
         """转发请求到指定服务商"""
         api_key = os.getenv(provider["env_var"])
         if not api_key:
             raise ValueError(f"Missing API key for {provider['name']}")
             
         try:
-            body = await request.json()
-            # 参数适配
-            body = self.adapt_request(provider, body)
-            
+            original_body = await request.json()
+            modified_body = original_body.copy()
+            modified_body["model"] = provider["model"]
+            stream_mode = modified_body.get("stream", False)  # 获取流式模式标志
+
             async with httpx.AsyncClient(base_url=provider["base_url"]) as client:
+                # 添加流式传输支持
+                stream = modified_body.get("stream", False)
+                
                 start = time.time()
                 response = await client.post(
-                    provider["endpoint"],
-                    json=body,
+                    "/chat/completions",
+                    json=modified_body,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
-                    timeout=30
+                    timeout=30,
+                    # 关键修改：根据stream参数启用流式响应
+                    follow_redirects=stream_mode
                 )
                 response.raise_for_status()
-                
+
                 # 更新统计信息
                 self.routing.update_stats(
                     provider["name"],
                     True,
                     (time.time() - start) * 1000
                 )
-                return response.json()
+
+                # 返回原始响应内容和 headers，并携带流式模式标志
+                return {
+                    "content": response,
+                    "headers": dict(response.headers),
+                    "status_code": response.status_code,
+                    "stream": stream_mode  # 新增流式模式标志
+                }
                 
         except httpx.HTTPStatusError as e:
-            self.routing.update_stats(provider["name"], False, 0)
-            return JSONResponse(
-                content={"error": f"Upstream error: {e.response.text}"},
-                status_code=e.response.status_code
+            self.routing.update_stats(provider["name"], False, 30000)
+            # 改为抛出HTTPException而不是返回JSONResponse
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"Upstream error: {e.response.text}"
             )
         except Exception as e:
-            self.routing.update_stats(provider["name"], False, 0)
+            self.routing.update_stats(provider["name"], False, 30000)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(e)
             )
 
-    def adapt_request(self, provider: Dict, body: Dict) -> Dict:
-        """适配不同服务商的请求参数"""
-        adapted = body.copy()
-        
-        # 模型名称映射
-        adapted["model"] = provider["model"]
-        
-        # 火山引擎特殊参数
-        if provider["name"] == "huoshan":
-            adapted["parameters"] = {
-                "temperature": adapted.get("temperature", 0.7),
-                "max_tokens": adapted.get("max_tokens", 512)
-            }
-        
-        return adapted
-
     async def chat_completion(self, request: Request):
         """处理聊天补全请求"""
         # 智能路由选择
         provider = self.routing.get_best_provider()
+        print("本次请求由：",provider," 执行；")
         if not provider:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -289,8 +291,34 @@ class OpenAIGateway:
         # 请求转发
         try:
             result = await self.forward_request(provider, request)
-            return JSONResponse(content=result)
+            
+            if result["stream"]:
+                # 创建异步生成器逐块转发流式数据
+                async def generate_stream():
+                    async for chunk in result["content"].aiter_bytes():
+                        yield chunk
+
+                return StreamingResponse(
+                    content=generate_stream(),
+                    headers=result["headers"],
+                    status_code=result["status_code"],
+                    media_type="text/event-stream"  # 强制指定流式类型
+                )
+            else:
+                return JSONResponse(
+                    content=json.loads(await result["content"].aread()),
+                    headers=result["headers"],
+                    status_code=result["status_code"]
+                )
         except HTTPException as e:
+            print("============================================")
+            print("触发了chat_completion的失败重试逻辑，错误如下：")
+            print(e)
+            # 获取原始请求体
+            original_body = await request.json()
+            print("触发了错误的请求体为：")
+            print(original_body)
+            print("============================================")
             # 失败重试逻辑
             backup_providers = [p for p in PROVIDERS if p["name"] != provider["name"]]
             for backup in backup_providers:

@@ -600,3 +600,54 @@ if __name__ == "__main__":
 
 
 ==============================================
+async def forward_request(self, provider: Dict, request: Request):
+    print("进入了forward_request")
+    """转发请求到指定服务商"""
+    api_key = os.getenv(provider["env_var"])
+    if not api_key:
+        raise ValueError(f"Missing API key for {provider['name']}")
+        
+    try:
+        # 获取原始请求体
+        original_body = await request.json()
+        
+        # 创建修改后的请求体，强制使用当前provider的model配置
+        modified_body = original_body.copy()
+        modified_body["model"] = provider["model"]  # 关键修改：覆盖模型名称
+        
+        async with httpx.AsyncClient(base_url=provider["base_url"]) as client:
+            start = time.time()
+            response = await client.post(
+                "/chat/completions",
+                json=modified_body,  # 使用修改后的请求体
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            # 更新统计信息
+            self.routing.update_stats(
+                provider["name"],
+                True,
+                (time.time() - start) * 1000
+            )
+            return response.json()
+            
+    except httpx.HTTPStatusError as e:
+        # 添加详细错误日志
+        print(f"服务商 {provider['name']} 返回错误: {e.response.status_code} {e.response.text}")
+        self.routing.update_stats(provider["name"], False, 30000)
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Upstream error: {e.response.text}"
+        )
+    except Exception as e:
+        print(f"服务商 {provider['name']} 请求异常: {str(e)}")
+        self.routing.update_stats(provider["name"], False, 30000)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
