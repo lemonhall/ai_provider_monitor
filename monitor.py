@@ -25,7 +25,7 @@ import httpx
 # [Environment]::SetEnvironmentVariable("HUOSHAN_API_KEY","your_api_key","User")。
 # 如果要设置系统级别的环境变量（需要管理员权限），可以将最后一个参数改为"Machine"，
 # 例如
-# [Environment]::SetEnvironmentVariable("TENCENT_API_KEY","sk-Uk9ULfQbo0J8w3KQNAtXHqbE0z21dbFWGhMMAsNtwpHZmBmP","Machine")。
+# [Environment]::SetEnvironmentVariable("TENCENT_API_KEY","your_api_key","Machine")。
 # Set up OpenAI API key
 # 记得使用以上方法后，需要关闭vscode后重启vscode，之后点击F5运行python脚本的时候才能生效
 
@@ -33,7 +33,7 @@ import httpx
 MQTT_BROKER = "192.168.50.233"
 MQTT_PORT = 1883
 STATUS_TOPIC = "api_status"  # 状态上报主题
-CHECK_INTERVAL = 600  # 检查间隔（秒）
+CHECK_INTERVAL = 60  # 检查间隔（秒）
 
 # 日志文件路径
 LOG_FILE = "mqtt_status.log"

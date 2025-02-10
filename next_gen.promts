@@ -1,0 +1,602 @@
+from datetime import datetime
+import os
+import time
+import json
+import warnings
+from typing import Dict, Optional
+import paho.mqtt.client as mqtt
+from paho.mqtt.client import CallbackAPIVersion
+from openai import OpenAI
+from openai import APIConnectionError, APIError, APIStatusError
+# 使用 asyncio 运行异步代码
+import asyncio
+import httpx
+
+
+# -----------------------------------------------------------------------------
+# 使用 PowerShell
+# 打开 PowerShell（在 “开始” 菜单中搜索 “PowerShell” 并打开）。
+# 要为当前用户设置环境变量，可以使用
+# $env:OPENAI_API_KEY = "your_api_key"
+# 命令。
+# 同样，将"your_api_key"替换为实际的 API 密钥。不过，这种方式设置的环境变量只在当前 PowerShell 会话中有效。
+
+# 要永久设置环境变量（对于当前用户），可以使用
+# [Environment]::SetEnvironmentVariable("HUOSHAN_API_KEY","your_api_key","User")。
+# 如果要设置系统级别的环境变量（需要管理员权限），可以将最后一个参数改为"Machine"，
+# 例如
+# [Environment]::SetEnvironmentVariable("TENCENT_API_KEY","your_api_key","Machine")。
+# Set up OpenAI API key
+# 记得使用以上方法后，需要关闭vscode后重启vscode，之后点击F5运行python脚本的时候才能生效
+
+# 配置信息
+MQTT_BROKER = "192.168.50.233"
+MQTT_PORT = 1883
+STATUS_TOPIC = "api_status"  # 状态上报主题
+CHECK_INTERVAL = 600  # 检查间隔（秒）
+
+# 日志文件路径
+LOG_FILE = "mqtt_status.log"
+
+# 服务商配置列表
+PROVIDERS = [
+    {
+        "name": "deepseek",
+        "env_var": "OPENAI_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-chat"
+    },
+    {
+        "name": "siliconflow",
+        "env_var": "SILICONFLOW_API_KEY",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "deepseek-ai/DeepSeek-V3"
+    },
+    {
+        "name": "huoshan",
+        "env_var": "HUOSHAN_API_KEY",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "ep-20250204220334-l2q5g"
+    },
+    {
+        "name": "tencent",
+        "env_var": "TENCENT_API_KEY",
+        "base_url": "https://api.lkeap.cloud.tencent.com/v1",
+        "model": "deepseek-v3"
+    },
+    {
+        "name": "bailian",
+        "env_var": "DASHSCOPE_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "deepseek-v3"
+    }
+]
+
+class APIMonitor:
+    def __init__(self):
+        self.mqtt_client = mqtt.Client(client_id="api_monitor", callback_api_version=CallbackAPIVersion.VERSION2)
+        self.mqtt_client.on_connect = self.on_connect
+        self.mqtt_client.on_disconnect = self.on_disconnect
+        self.mqtt_client.on_log = self.on_log  # 可选：用于调试日志
+        self.mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        self.mqtt_client.loop_start()
+    
+    def on_connect(self, client, userdata, flags, reason_code, properties=None):
+        """连接回调"""
+        # Check if connection succeeded (0: Connection accepted)
+        if reason_code.value == 0:
+            print("Connected to MQTT broker successfully.")
+        else:
+            print(f"Connection failed with reason code: {reason_code.value}")
+    
+    def on_disconnect(self, client, userdata, flags, reason_code, properties):
+        """断开连接回调"""
+        print(f"Disconnected from MQTT broker with reason code: {reason_code}")
+    
+    def on_log(self, client, userdata, level, buf):
+        """调试日志回调"""
+        print(f"MQTT Log: {buf}")
+    
+    def check_provider_status(self, provider: Dict) -> Dict:
+        """检查单个服务商状态"""
+        status = {
+            "provider": provider["name"],
+            "online": False,
+            "response_time": None,
+            "error": None,
+            "timestamp": int(time.time())
+        }
+        
+        api_key = os.getenv(provider["env_var"])
+        if not api_key:
+            status["error"] = "API key not found"
+            return status
+        
+        try:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=provider["base_url"],
+                timeout=10
+            )
+            
+            start_time = time.time()
+            # 发送测试请求
+            client.chat.completions.create(
+                messages=[{"role": "user", "content": "ping"}],
+                model=provider["model"],
+                max_tokens=5
+            )
+            status["response_time"] = round((time.time() - start_time) * 1000, 2)
+            status["online"] = True
+        except APIConnectionError as e:
+            status["error"] = f"Connection error: {e}"
+        except APIStatusError as e:
+            status["error"] = f"API error: {e.status_code} {e.message}"
+        except APIError as e:
+            status["error"] = f"API error: {e}"
+        except Exception as e:
+            status["error"] = f"Unexpected error: {str(e)}"
+        
+        return status
+    
+    def check_all_providers(self):
+        """检查所有服务商"""
+        for provider in PROVIDERS:
+            status = self.check_provider_status(provider)
+            self.publish_status(status)
+            
+    def log_payload(self, payload: str):
+        """将 payload 写入日志文件"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] Published status: {payload}\n"
+
+        # 确保以 UTF-8 格式写入文件
+        with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+            log_file.write(log_entry)
+    
+    def publish_status(self, status: Dict):
+        """发布状态到MQTT"""
+        payload = json.dumps(status, ensure_ascii=False)
+        self.mqtt_client.publish(
+            f"{STATUS_TOPIC}",
+            payload,
+            retain=True  # 设置 retain 标志为 True
+        )
+        print(f"Published status: {payload}")
+
+        """发布状态到 FastAPI 服务器"""
+        async def send_request():
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "http://localhost:8000/api_status",  # 替换为 FastAPI 服务器的实际 IP 和端口
+                    json=status
+                )
+                return response
+
+        try:
+            # 使用 asyncio.run 运行异步函数
+            response = asyncio.run(send_request())
+            
+            if response.status_code == 200:
+                print(f"Status published successfully: {payload}")
+            else:
+                print(f"Failed to publish status: {response.text}")
+                print(response)
+        except Exception as e:
+            print(f"Error publishing status: {str(e)}")
+        # 写入日志文件
+        self.log_payload(payload)
+
+if __name__ == "__main__":
+    monitor = APIMonitor()
+    try:
+        while True:
+            monitor.check_all_providers()
+            time.sleep(CHECK_INTERVAL)
+    except KeyboardInterrupt:
+        monitor.mqtt_client.loop_stop()
+        print("Monitoring stopped")
+
+这是我的监控代码，我在想能否结合这个监控，写一个本地的透明转发代理，你应该以我的监控代码为基础，
+用FastAPI直接模拟出来一整套的openai的http的服务的endpoint，并监听在本地即可，使用这个http服务
+的python程序不需要提供任何api_key这些，只需要传入模型family名称，比如v3或者r1，则代理会自动
+找到config里对应的模型家族，不同供应商的具体模型名称，接到请求后，代理转发给对应的服务商即可。
+切记，该程序仍旧是兼容python的openai的这个库的，但可以智能路由请求到对应的服务商，另外每一次实际
+的请求，其实也可以作为一次监控的请求，记录进入日志，服务商的切换暂时是手工在这个代理当中切换
+未来的需求暂不考虑，但要留好架构扩展的必要，比如使用某个UI界面去配置，或者允许我根据AI评价的
+请求日志，动态智能的切换服务商。
+
+
+
+
+
+
+
+===========================================
+    async def check_provider(self, provider: Dict):
+        """异步检查单个服务商可用性"""
+        api_key = os.getenv(provider["env_var"])
+        if not api_key:
+            return
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                start = time.time()
+                response = await client.post(
+                    f"{provider['base_url']}/check",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=5
+                )
+                response.raise_for_status()
+                self.routing.provider_stats[provider["name"]].online = True
+                self.routing.update_stats(
+                    provider["name"],
+                    True,
+                    (time.time() - start) * 1000
+                )
+        except Exception as e:
+            self.routing.provider_stats[provider["name"]].online = False
+
+
+你这个函数写的有点小问题
+
+你应该使用python的openai函数去call啊
+比如这样：
+        api_key = os.getenv(provider["env_var"])
+        if not api_key:
+            status["error"] = "API key not found"
+            return status
+        
+        try:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=provider["base_url"],
+                timeout=10
+            )
+            
+            start_time = time.time()
+            # 发送测试请求
+            client.chat.completions.create(
+                messages=[{"role": "user", "content": "ping"}],
+                model=provider["model"],
+                max_tokens=5
+            )
+
+
+=====================================================
+类“FastAPI”中的“on_event”方法已弃用
+  on_event is deprecated, use lifespan event handlers instead.
+
+Read more about it in the
+[FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).Pylance
+
+
+======================================================
+
+ERROR:    Traceback (most recent call last):
+  File "E:\development\ai_provider_monitor\.venv\Lib\site-packages\starlette\routing.py", line 693, in lifespan
+    async with self.lifespan_context(app) as maybe_state:
+               ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\Python313\Lib\contextlib.py", line 214, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "e:\development\ai_provider_monitor\gateway.py", line 171, in lifespan
+    self.background_tasks.add(monitor_task)
+    ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OpenAIGateway' object has no attribute 'background_tasks'
+
+Health check error: 'APIMonitor' object has no attribute 'run_health_check'
+ERROR:    Application startup failed. Exiting.
+PS E:\development\ai_provider_monitor> 
+
+========================================================
+from datetime import datetime
+import os
+import time
+import json
+import asyncio
+from typing import AsyncIterator, Dict, List, Optional, Set
+from fastapi.concurrency import asynccontextmanager
+import httpx
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from openai import APIConnectionError, APIError, AsyncOpenAI
+from pydantic import BaseModel
+import uvicorn
+
+# 服务商配置列表
+PROVIDERS = [
+    {
+        "name": "deepseek",
+        "env_var": "OPENAI_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-chat"
+    },
+    {
+        "name": "siliconflow",
+        "env_var": "SILICONFLOW_API_KEY",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "deepseek-ai/DeepSeek-V3"
+    },
+    {
+        "name": "huoshan",
+        "env_var": "HUOSHAN_API_KEY",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "ep-20250204220334-l2q5g"
+    },
+    {
+        "name": "tencent",
+        "env_var": "TENCENT_API_KEY",
+        "base_url": "https://api.lkeap.cloud.tencent.com/v1",
+        "model": "deepseek-v3"
+    },
+    {
+        "name": "bailian",
+        "env_var": "DASHSCOPE_API_KEY",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "deepseek-v3"
+    }
+]
+
+class ProviderStatus(BaseModel):
+    online: bool = False
+    last_check: datetime = datetime.min
+    response_time: float = float('inf')
+    success_rate: float = 0.0
+    total_requests: int = 0
+    failed_requests: int = 0
+    last_error: Optional[str] = None  # 新增错误信息字段
+    retry_count: int = 0
+
+class RoutingManager:
+    def __init__(self):
+        self.provider_stats = {p["name"]: ProviderStatus() for p in PROVIDERS}
+        self.history = []
+        
+    def update_stats(self, provider: str, success: bool, response_time: float):
+        # 其他统计逻辑保持不变...
+        stats = self.provider_stats[provider]
+        stats.total_requests += 1
+        stats.failed_requests += 0 if success else 1
+        stats.success_rate = 1 - (stats.failed_requests / stats.total_requests)
+        stats.response_time = (stats.response_time + response_time) / 2
+        stats.last_check = datetime.now()
+
+    def get_best_provider(self) -> Optional[Dict]:
+        available = []
+        for provider in PROVIDERS:
+            stats = self.provider_stats[provider["name"]]
+            if stats.online and stats.success_rate > 0.7:
+                available.append((provider, stats))
+        
+        if not available:
+            return None
+            
+        # 根据响应时间和成功率综合评分
+        return min(
+            available,
+            key=lambda x: (x[1].response_time * 0.6 + (1 - x[1].success_rate) * 0.4)
+        )[0]
+
+class APIMonitor:
+    def __init__(self, routing: RoutingManager):
+        #这里相当于是依赖注入了对应的路由管理器
+        self.routing = routing
+        
+    async def check_provider(self, provider: Dict):
+        """使用OpenAI SDK进行健康检查"""
+        status = self.routing.provider_stats[provider["name"]]
+        """异步检查单个服务商可用性"""
+        api_key = os.getenv(provider["env_var"])
+        if not api_key:
+            return
+            
+        try:
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=provider["base_url"],
+                timeout=10.0
+            )
+            start_time = time.time()
+            # 发送真实的API请求测试
+            response = await client.chat.completions.create(
+                messages=[{"role": "user", "content": "ping"}],
+                model=provider["model"],
+                max_tokens=5,
+                temperature=0.1
+            )
+            # 验证响应有效性
+            if not response.choices or not response.choices[0].message.content:
+                raise ValueError("Invalid API response")
+            
+            latency = (time.time() - start_time) * 1000  # 毫秒
+
+            #对RoutingManager上报最新的情况
+            self.routing.update_stats(
+                provider["name"],
+                success=True,
+                response_time=latency
+            )
+            status.online = True
+            status.retry_count = 0
+            status.last_error = None
+
+        except Exception as e:
+            status.online = False
+            status.last_error = self._format_error(e)
+            status.retry_count += 1
+            self.routing.update_stats(
+                provider["name"],
+                success=False,
+                response_time=0
+            )
+        
+        finally:
+            status.last_check = datetime.now()
+            self.routing.update_stats(provider["name"])
+    
+    def _format_error(self, e: Exception) -> str:
+        """格式化错误信息"""
+        if isinstance(e, APIConnectionError):
+            return f"Connection error: {e.__cause__}"
+        elif isinstance(e, APIError):
+            return f"API error: {e.code} {e.message}"
+        return f"{type(e).__name__}: {str(e)}"
+
+    async def run_continuous_check(self):  # 修复2：正确的方法名称
+        """持续运行健康检查"""
+        while True:
+            try:
+                await self.run_health_check_cycle()  # 修复3：调用实际检查方法
+                await asyncio.sleep(300)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Monitor error: {str(e)}")
+                await asyncio.sleep(60)
+    
+    async def run_health_check_cycle(self):
+        """执行完整健康检查周期"""
+        tasks = []
+        for provider in PROVIDERS:
+            tasks.append(self.check_provider(provider))
+        await asyncio.gather(*tasks)
+
+class OpenAIGateway:
+    def __init__(self):
+        self.app = FastAPI(title="AI Gateway")
+        self.routing = RoutingManager()
+        self.monitor = APIMonitor(self.routing)
+        self.background_tasks: Set[asyncio.Task] = set()
+
+        
+        # 使用新的 lifespan 处理机制
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+            """生命周期管理"""
+            # 启动阶段
+            monitor_task = asyncio.create_task(self.monitor.run_continuous_check())
+            self.background_tasks.add(monitor_task)
+            monitor_task.add_done_callback(self.background_tasks.discard)
+            
+            yield  # 应用运行阶段
+            
+            # 关闭阶段
+            for task in self.background_tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self.app = FastAPI(
+            title="AI Gateway",
+            lifespan=lifespan
+        )
+        
+        # 注册路由保持不变
+        self.app.add_api_route(
+            "/v1/chat/completions",
+            self.chat_completion,
+            methods=["POST"]
+        )
+
+    async def forward_request(self, provider: Dict, request: Request):
+        """转发请求到指定服务商"""
+        api_key = os.getenv(provider["env_var"])
+        if not api_key:
+            raise ValueError(f"Missing API key for {provider['name']}")
+            
+        try:
+            body = await request.json()
+            # 参数适配
+            body = self.adapt_request(provider, body)
+            
+            async with httpx.AsyncClient(base_url=provider["base_url"]) as client:
+                start = time.time()
+                response = await client.post(
+                    provider["endpoint"],
+                    json=body,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=30
+                )
+                response.raise_for_status()
+                
+                # 更新统计信息
+                self.routing.update_stats(
+                    provider["name"],
+                    True,
+                    (time.time() - start) * 1000
+                )
+                return response.json()
+                
+        except httpx.HTTPStatusError as e:
+            self.routing.update_stats(provider["name"], False, 0)
+            return JSONResponse(
+                content={"error": f"Upstream error: {e.response.text}"},
+                status_code=e.response.status_code
+            )
+        except Exception as e:
+            self.routing.update_stats(provider["name"], False, 0)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(e)
+            )
+
+    def adapt_request(self, provider: Dict, body: Dict) -> Dict:
+        """适配不同服务商的请求参数"""
+        adapted = body.copy()
+        
+        # 模型名称映射
+        adapted["model"] = provider["model"]
+        
+        # 火山引擎特殊参数
+        if provider["name"] == "huoshan":
+            adapted["parameters"] = {
+                "temperature": adapted.get("temperature", 0.7),
+                "max_tokens": adapted.get("max_tokens", 512)
+            }
+        
+        return adapted
+
+    async def chat_completion(self, request: Request):
+        """处理聊天补全请求"""
+        # 智能路由选择
+        provider = self.routing.get_best_provider()
+        if not provider:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No available AI providers"
+            )
+            
+        # 请求转发
+        try:
+            result = await self.forward_request(provider, request)
+            return JSONResponse(content=result)
+        except HTTPException as e:
+            # 失败重试逻辑
+            backup_providers = [p for p in PROVIDERS if p["name"] != provider["name"]]
+            for backup in backup_providers:
+                try:
+                    result = await self.forward_request(backup, request)
+                    return JSONResponse(content=result)
+                except:
+                    continue
+            raise e
+
+# 运行服务
+if __name__ == "__main__":
+    gateway = OpenAIGateway()
+    uvicorn.run(gateway.app, host="0.0.0.0", port=8000)
+
+以上是我修改了的，最新的正在使用的程序
+报错：Monitor error: RoutingManager.update_stats() missing 2 required positional arguments: 'success' and 'response_time'
+
+你看一下怎么修改
+
+
+
+==============================================
